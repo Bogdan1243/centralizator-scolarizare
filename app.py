@@ -3,53 +3,64 @@ import pdfplumber
 import pandas as pd
 import io
 
-# Configurare pagină
 st.set_page_config(page_title="Centralizator Plan Școlarizare", layout="wide")
 st.title("📊 Centralizator Automat: Plan de Școlarizare")
-st.write("Încărcați fișierele PDF primite de la unitățile de învățământ. Aplicația va extrage tabelul de pe **Pagina 2** și va genera un fișier Excel centralizat.")
+st.write("Aplicația caută automat tabelul cu clase pe **toate paginile** fișierelor PDF. Documentele scanate sau scrise de mână vor fi semnalate separat pentru introducere manuală.")
 
-# Zona de Drag & Drop
 uploaded_files = st.file_uploader(
-    "Trageți fișierele PDF aici sau dați click pentru a selecta (Drag & Drop)", 
+    "Trageți fișierele PDF aici (Drag & Drop)", 
     type="pdf", 
     accept_multiple_files=True
 )
 
 if uploaded_files:
     all_data = []
+    manual_review_files = [] # Listă pentru fișierele cu probleme (scanate/de mână)
     
-    with st.spinner('Se procesează fișierele... Vă rugăm așteptați.'):
+    with st.spinner('Se analizează toate paginile... Vă rugăm așteptați.'):
         for file in uploaded_files:
-            # Extragem numele școlii din denumirea fișierului
             school_name = file.name.replace(".pdf", "").replace(".PDF", "")
+            table_found_in_file = False
             
             try:
                 with pdfplumber.open(file) as pdf:
-                    # Verificăm dacă documentul are cel puțin 2 pagini
-                    if len(pdf.pages) >= 2:
-                        page = pdf.pages[1] # Indexul 1 reprezintă Pagina 2
-                        table = page.extract_table()
+                    # Scanăm FIECARE pagină din document
+                    for page in pdf.pages:
+                        tables = page.extract_tables()
                         
-                        if table:
+                        for table in tables:
+                            rows_extracted = 0
+                            temp_data = []
+                            
                             for row in table:
-                                # Curățăm celulele (eliminăm textul gol sau caracterele invizibile)
                                 clean_row = [str(cell).strip() if cell is not None else "" for cell in row]
                                 
-                                # Condiția de păstrare: primul element din rând trebuie să fie un număr (Nr. crt.)
+                                # Căutăm rândurile care încep cu un număr
                                 if clean_row and clean_row[0].isdigit():
-                                    
-                                    # Ne asigurăm că rândul extras are fix 9 coloane (completăm cu spații goale dacă lipsesc)
                                     while len(clean_row) < 9:
                                         clean_row.append("")
                                     clean_row = clean_row[:9]
                                     
-                                    # Adăugăm Unitatea de Învățământ ca primă coloană
                                     final_row = [school_name] + clean_row
-                                    all_data.append(final_row)
+                                    temp_data.append(final_row)
+                                    rows_extracted += 1
+                            
+                            # Dacă am găsit rânduri valide în acest tabel, le adăugăm
+                            if rows_extracted > 0:
+                                all_data.extend(temp_data)
+                                table_found_in_file = True
+                
+                # Dacă am terminat de citit tot PDF-ul și nu am găsit niciun tabel digital:
+                if not table_found_in_file:
+                    manual_review_files.append(file.name)
+                    
             except Exception as e:
-                st.error(f"Eroare la procesarea fișierului {file.name}: {e}")
+                manual_review_files.append(f"{file.name} (Eroare la citire)")
 
-    # Dacă am găsit date valide, construim tabelul final
+    # Afișăm rezultatele
+    st.markdown("---")
+    
+    # 1. Secțiunea de succes (Datele extrase)
     if all_data:
         columns = [
             "Unitate Învățământ", "Nr.", "Structura / locația", 
@@ -60,24 +71,26 @@ if uploaded_files:
         
         df = pd.DataFrame(all_data, columns=columns)
         
-        st.success(f"✅ Au fost procesate cu succes datele din {len(uploaded_files)} fișiere!")
+        st.success(f"✅ Au fost extrase automat date din **{len(uploaded_files) - len(manual_review_files)}** fișiere!")
         
-        # Afișare Preview
         st.subheader("Previzualizare Date Centralizate")
         st.dataframe(df, use_container_width=True)
         
-        # Generare fișier Excel pentru descărcare
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name='Centralizator_Clase')
         excel_data = output.getvalue()
         
-        st.markdown("---")
         st.download_button(
-            label="📥 Descarcă Fișierul Excel",
+            label="📥 Descarcă Centralizatorul Excel",
             data=excel_data,
-            file_name="Centralizator_Plan_Scolarizare.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            file_name="Centralizator_Automat.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            type="primary"
         )
-    else:
-        st.warning("Nu au putut fi identificate rânduri valide (care să înceapă cu un număr) pe pagina 2 a fișierelor încărcate.")
+    
+    # 2. Secțiunea de alertă (Atenție la fișierele scanate)
+    if manual_review_files:
+        st.error(f"⚠️ Atenție! Următoarele {len(manual_review_files)} fișiere nu conțin tabele digitale detectabile (probabil sunt scanate ca poze sau completate de mână). Acestea trebuie verificate manual:")
+        for bad_file in manual_review_files:
+            st.write(f"- 📄 **{bad_file}**")
